@@ -49,6 +49,43 @@ is_wsl() {
     return 1
 }
 
+# Function to add volume to docker-compose.yml volumes section
+add_docker_volume() {
+    local volume_name="$1"
+    local compose_file="${2:-docker-compose.yml}"
+    
+    if [ -z "$volume_name" ]; then
+        print_error "Volume name is required"
+        return 1
+    fi
+    
+    if [ ! -f "$compose_file" ]; then
+        print_error "Docker compose file not found: $compose_file"
+        return 1
+    fi
+    
+    # Check if volume already exists
+    if grep -q "^[[:space:]]*${volume_name}:" "$compose_file"; then
+        print_info "Volume '$volume_name' already exists in $compose_file"
+        return 0
+    fi
+    
+    # Check if volumes section exists
+    if grep -q "^volumes:" "$compose_file"; then
+        # volumes: section exists, add the volume to it
+        sed -i "/^volumes:/a\\  ${volume_name}:" "$compose_file"
+        print_success "Added volume '$volume_name' to existing volumes section"
+    else
+        # No volumes section exists, create it
+        echo "" >> "$compose_file"
+        echo "volumes:" >> "$compose_file"
+        echo "  ${volume_name}:" >> "$compose_file"
+        print_success "Created volumes section and added volume '$volume_name'"
+    fi
+    
+    return 0
+}
+
 # Function to check for NVIDIA GPU and Container Toolkit
 check_nvidia() {
     local has_nvidia_gpu=false
@@ -348,24 +385,15 @@ setup_hardware_transcoding() {
     fi
     
     # Modify docker-compose.yml to add extends section
-    if ! grep -q "extends:" docker-compose.yml; then
-        print_info "Adding hardware acceleration configuration to docker-compose.yml..."
-        
-        # Find the immich-server service and add extends section
-        sed -i '/immich-server:/,/^[[:space:]]*[^[:space:]]/ {
-            /container_name: immich_server/a\
-    extends:\
-      file: hwaccel.transcoding.yml\
-      service: '"$api"'
-        }' docker-compose.yml
-        
-        print_success "Hardware acceleration configuration added to docker-compose.yml"
-    else
-        print_warning "Extends section already exists in docker-compose.yml"
+    # Check for uncommented extends sections in immich-server (exclude commented lines)
+    if grep -A 10 "immich-server:" docker-compose.yml | grep -q "^[[:space:]]*extends:"; then
+        print_warning "Found active hardware acceleration in immich-server"
         read -p "Replace existing hardware acceleration config? (y/N): " replace_config
         if [[ "$replace_config" =~ ^[Yy]$ ]]; then
-            # Remove existing extends section and add new one
-            sed -i '/extends:/,+2d' docker-compose.yml
+            # Remove existing active extends section and add new one
+            sed -i '/immich-server:/,/^[[:space:]]*[^[:space:]]/ {
+                /extends:/,+2d
+            }' docker-compose.yml
             sed -i '/immich-server:/,/^[[:space:]]*[^[:space:]]/ {
                 /container_name: immich_server/a\
     extends:\
@@ -374,6 +402,24 @@ setup_hardware_transcoding() {
             }' docker-compose.yml
             print_success "Hardware acceleration configuration updated in docker-compose.yml"
         fi
+    else
+        # No active extends found, add new configuration (remove commented sections first if they exist)
+        print_info "Adding hardware acceleration configuration to docker-compose.yml..."
+        
+        # Remove any commented extends sections
+        sed -i '/immich-server:/,/^[[:space:]]*[^[:space:]]/ {
+            /# extends:/,+2d
+        }' docker-compose.yml
+        
+        # Add new extends section
+        sed -i '/immich-server:/,/^[[:space:]]*[^[:space:]]/ {
+            /container_name: immich_server/a\
+    extends:\
+      file: hwaccel.transcoding.yml\
+      service: '"$api"'
+        }' docker-compose.yml
+        
+        print_success "Hardware acceleration configuration added to docker-compose.yml"
     fi
     
     # Special handling for RKMPP with tonemapping
@@ -681,23 +727,12 @@ setup_ml_hardware_acceleration() {
     fi
     
     # Modify docker-compose.yml to add extends section for ML service
-    if ! grep -A 10 "immich-machine-learning:" docker-compose.yml | grep -q "extends:"; then
-        print_info "Adding ML hardware acceleration configuration to docker-compose.yml..."
-        
-        # Find the immich-machine-learning service and add extends section
-        sed -i '/immich-machine-learning:/,/^[[:space:]]*[^[:space:]]/ {
-            /container_name: immich_machine_learning/a\
-    extends:\
-      file: hwaccel.ml.yml\
-      service: '"$backend"'
-        }' docker-compose.yml
-        
-        print_success "ML hardware acceleration configuration added to docker-compose.yml"
-    else
-        print_warning "ML extends section already exists in docker-compose.yml"
+    # Check for uncommented extends sections in immich-machine-learning (exclude commented lines)
+    if grep -A 10 "immich-machine-learning:" docker-compose.yml | grep -q "^[[:space:]]*extends:"; then
+        print_warning "Found active ML hardware acceleration in immich-machine-learning"
         read -p "Replace existing ML hardware acceleration config? (y/N): " replace_ml_config
         if [[ "$replace_ml_config" =~ ^[Yy]$ ]]; then
-            # Remove existing extends section from ML service and add new one
+            # Remove existing active extends section and add new one
             sed -i '/immich-machine-learning:/,/^[[:space:]]*[^[:space:]]/ {
                 /extends:/,+2d
             }' docker-compose.yml
@@ -709,6 +744,24 @@ setup_ml_hardware_acceleration() {
             }' docker-compose.yml
             print_success "ML hardware acceleration configuration updated in docker-compose.yml"
         fi
+    else
+        # No active extends found, add new configuration (remove commented sections first if they exist)
+        print_info "Adding ML hardware acceleration configuration to docker-compose.yml..."
+        
+        # Remove any commented extends sections
+        sed -i '/immich-machine-learning:/,/^[[:space:]]*[^[:space:]]/ {
+            /# extends:/,+2d
+        }' docker-compose.yml
+        
+        # Add new extends section
+        sed -i '/immich-machine-learning:/,/^[[:space:]]*[^[:space:]]/ {
+            /container_name: immich_machine_learning/a\
+    extends:\
+      file: hwaccel.ml.yml\
+      service: '"$backend"'
+        }' docker-compose.yml
+        
+        print_success "ML hardware acceleration configuration added to docker-compose.yml"
     fi
     
     # Modify the image tag to include the backend
@@ -909,13 +962,11 @@ main() {
             # Use Docker volume
             sed -i "s|DB_DATA_LOCATION=./postgres|DB_DATA_LOCATION=pgdata|" .env
             
-            # Add volume to docker-compose.yml
-            if ! grep -q "pgdata:" docker-compose.yml; then
-                echo "" >> docker-compose.yml
-                echo "volumes:" >> docker-compose.yml
-                echo "  model-cache:" >> docker-compose.yml
-                echo "  pgdata:" >> docker-compose.yml
+            # Add pgdata volume to docker-compose.yml
+            if add_docker_volume "pgdata"; then
                 print_success "Docker volume configuration applied."
+            else
+                print_error "Failed to configure Docker volume"
             fi
         else
             echo "Current DB_DATA_LOCATION: ./postgres"
